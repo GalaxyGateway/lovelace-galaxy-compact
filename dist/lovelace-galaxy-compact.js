@@ -1,5 +1,5 @@
 console.info(
-  "%c  lovelace-galaxy-compact  \n%c Version 2.7.0",
+  "%c  lovelace-galaxy-compact  \n%c Version 2.8.0",
   "color: orange; font-weight: bold; background: black",
   "color: white; font-weight: bold; background: dimgray"
 );
@@ -60,6 +60,9 @@ class GalaxyCompactCard extends HTMLElement {
     this._pinBuffer   = "";
     this._pinPayload  = null;  // pending MQTT payload awaiting PIN confirm
     this._pinError    = false;
+    this._pending     = false; // true while waiting for state change after action
+    this._pendingTimer = null; // timeout handle for 10s fallback
+    this._pendingState = null; // entity state at the time of the action
   }
 
   setConfig(config) {
@@ -85,10 +88,20 @@ class GalaxyCompactCard extends HTMLElement {
     const oldHass = this._hass;
     this._hass = hass;
     if (!oldHass) { this._render(); return; }
-    if (
-      oldHass.states[cfg.entity]       !== hass.states[cfg.entity] ||
-      oldHass.states[cfg.entity_alarm] !== hass.states[cfg.entity_alarm]
-    ) {
+
+    const stateChanged = oldHass.states[cfg.entity] !== hass.states[cfg.entity];
+    const alarmChanged = oldHass.states[cfg.entity_alarm] !== hass.states[cfg.entity_alarm];
+
+    // If we were waiting for a state change, clear pending as soon as it arrives
+    if (this._pending && stateChanged) {
+      const newState = (hass.states[cfg.entity] || {}).state;
+      if (newState !== this._pendingState) {
+        this._clearPending();
+        return;
+      }
+    }
+
+    if (stateChanged || alarmChanged) {
       this._render();
     }
   }
@@ -119,6 +132,64 @@ class GalaxyCompactCard extends HTMLElement {
       qos:     0,
       retain:  false,
     });
+    // Only hide chips for arming/disarming actions, not reset (3)
+    // Reset is near-instant so no need to hide
+    if (payload !== "3") {
+      this._setPending();
+    }
+  }
+
+  // ── Pending state — hide action chips while waiting for state change ────────
+  _setPending() {
+    this._pending      = true;
+    this._pendingState = this._hass
+      ? (this._hass.states[this._config.entity] || {}).state
+      : null;
+
+    // Clear any existing timeout
+    if (this._pendingTimer) clearTimeout(this._pendingTimer);
+
+    // 10 second fallback — re-enable chips even if state didn't change
+    this._pendingTimer = setTimeout(() => {
+      this._clearPending();
+    }, 10000);
+
+    this._updateChips();
+  }
+
+  _clearPending() {
+    if (this._pendingTimer) { clearTimeout(this._pendingTimer); this._pendingTimer = null; }
+    this._pending      = false;
+    this._pendingState = null;
+    this._updateChips();
+  }
+
+  // Swap chips area between action buttons and pending spinner without
+  // rebuilding the entire card DOM (avoids flicker).
+  _updateChips() {
+    const sr = this.shadowRoot;
+    const chipsEl = sr.querySelector(".chips");
+    if (!chipsEl) return;
+
+    if (this._pending) {
+      // Show a subtle spinner in place of the chips
+      chipsEl.innerHTML = `
+        <div style="
+          display:flex;align-items:center;gap:8px;
+          color:var(--secondary-text-color);font-size:11px;
+          margin-right:10px;">
+          <div style="
+            width:18px;height:18px;border-radius:50%;
+            border:2px solid var(--divider-color,#555);
+            border-top-color:var(--primary-color,#5b9bd5);
+            animation:spin .8s linear infinite;flex-shrink:0">
+          </div>
+          Waiting…
+        </div>`;
+    } else {
+      // Trigger a full re-render to restore correct chips for current state
+      this._render();
+    }
   }
 
   // ── Action triggered — show PIN or send directly ──────────────────────────
@@ -347,6 +418,7 @@ class GalaxyCompactCard extends HTMLElement {
   .pkey:active { transform: scale(.93); }
   @keyframes blink { 0%,100%{opacity:0} 50%{opacity:1} }
   .blink { animation: blink 2s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 ${keypad}
 <ha-card>
